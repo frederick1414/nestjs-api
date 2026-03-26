@@ -1,48 +1,46 @@
 import {
   BadRequestException,
   ConflictException,
+  InternalServerErrorException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { EntityManager } from '@mikro-orm/core';
 import { hash } from 'bcryptjs';
-import { PrismaService } from '../prisma/prisma.service';
 import { CreateUserDto } from './dto/create-user.dto';
+import { User, UserRole } from './entities/user.entity';
 import { UpdateUserDto } from './dto/update-user.dto';
 
 @Injectable()
 export class UsersService {
-  constructor(private readonly prisma: PrismaService) {}
-
-  private readonly userSelect = {
-    id: true,
-    name: true,
-    email: true,
-    role: true,
-  } as const;
+  constructor(private readonly em: EntityManager) {}
 
   async findAll() {
-    return this.prisma.user.findMany({
-      select: this.userSelect,
-      orderBy: { id: 'asc' },
-    });
+    const users = await this.em.find(User, {}, { orderBy: { id: 'asc' } });
+    return users.map((user) => this.toPublicUser(user));
   }
 
   async findOne(id: number) {
-    return this.getUserByIdOrThrow(id);
+    const user = await this.getUserByIdOrThrow(id);
+    return this.toPublicUser(user);
   }
 
   async create(user: CreateUserDto) {
+    await this.ensureEmailIsAvailable(user.email);
+
+    const newUser = this.em.create(User, {
+      name: user.name,
+      email: user.email,
+      passwordHash: await hash(user.password, 10),
+      role: UserRole.USER,
+    });
+
     try {
-      return await this.prisma.user.create({
-        data: {
-          name: user.name,
-          email: user.email,
-          passwordHash: await hash(user.password, 10),
-        },
-        select: this.userSelect,
-      });
+      this.em.persist(newUser);
+      await this.em.flush();
+      return this.toPublicUser(newUser);
     } catch (error) {
-      this.handlePrismaError(error, user);
+      this.handlePersistenceError(error);
     }
   }
 
@@ -51,45 +49,43 @@ export class UsersService {
       throw new BadRequestException('At least one field must be provided');
     }
 
-    await this.getUserByIdOrThrow(id);
+    const user = await this.getUserByIdOrThrow(id);
 
-    const updateData = {
-      ...(data.name !== undefined ? { name: data.name } : {}),
-      ...(data.email !== undefined ? { email: data.email } : {}),
-      ...(data.password !== undefined
-        ? { passwordHash: await hash(data.password, 10) }
-        : {}),
-    };
+    if (data.email !== undefined) {
+      await this.ensureEmailIsAvailable(data.email, id);
+      user.email = data.email;
+    }
+
+    if (data.name !== undefined) {
+      user.name = data.name;
+    }
+
+    if (data.password !== undefined) {
+      user.passwordHash = await hash(data.password, 10);
+    }
 
     try {
-      return await this.prisma.user.update({
-        where: { id },
-        data: updateData,
-        select: this.userSelect,
-      });
+      await this.em.flush();
+      return this.toPublicUser(user);
     } catch (error) {
-      this.handlePrismaError(error, data);
+      this.handlePersistenceError(error);
     }
   }
 
   async delete(id: number) {
     const user = await this.getUserByIdOrThrow(id);
 
-    await this.prisma.user.delete({
-      where: { id },
-    });
+    this.em.remove(user);
+    await this.em.flush();
 
     return {
       message: 'User deleted successfully',
-      user,
+      user: this.toPublicUser(user),
     };
   }
 
   private async getUserByIdOrThrow(id: number) {
-    const user = await this.prisma.user.findUnique({
-      where: { id },
-      select: this.userSelect,
-    });
+    const user = await this.em.findOne(User, { id });
 
     if (!user) {
       throw new NotFoundException(`User with id ${id} not found`);
@@ -98,81 +94,28 @@ export class UsersService {
     return user;
   }
 
-  private handlePrismaError(
-    error: unknown,
-    data?: Partial<CreateUserDto | UpdateUserDto>,
-  ): never {
-    const uniqueField = this.getUniqueConstraintField(error);
+  private async ensureEmailIsAvailable(email: string, excludedId?: number) {
+    const userWithEmail = await this.em.findOne(User, { email });
 
-    if (this.isUniqueConstraintError(error) && uniqueField === null) {
-      throw new ConflictException('User already exists');
+    if (userWithEmail && userWithEmail.id !== excludedId) {
+      throw new ConflictException(`User with email ${email} already exists`);
     }
-
-    if (uniqueField === 'email') {
-      throw new ConflictException(
-        `User with email ${data?.email} already exists`,
-      );
-    }
-
-    if (uniqueField === 'name') {
-      throw new ConflictException(
-        `User with name ${data?.name} already exists`,
-      );
-    }
-
-    throw error;
   }
 
-  private getUniqueConstraintField(error: unknown) {
-    return typeof error === 'object' &&
-      error !== null &&
-      'code' in error &&
-      error.code === 'P2002'
-      ? this.extractUniqueTarget(error)
-      : null;
-  }
-
-  private isUniqueConstraintError(error: unknown): error is { code: string } {
-    return (
-      typeof error === 'object' &&
-      error !== null &&
-      'code' in error &&
-      error.code === 'P2002'
-    );
-  }
-
-  private extractUniqueTarget(error: unknown) {
-    if (
-      typeof error === 'object' &&
-      error !== null &&
-      'meta' in error &&
-      typeof error.meta === 'object' &&
-      error.meta !== null &&
-      'target' in error.meta
-    ) {
-      const target = error.meta.target;
-
-      if (Array.isArray(target) && typeof target[0] === 'string') {
-        return this.normalizeUniqueTarget(target[0]);
-      }
-
-      if (typeof target === 'string') {
-        return this.normalizeUniqueTarget(target);
-      }
+  private handlePersistenceError(error: unknown): never {
+    if (error instanceof ConflictException) {
+      throw error;
     }
 
-    return null;
+    throw new InternalServerErrorException('Unable to persist user changes');
   }
 
-  private normalizeUniqueTarget(target: string) {
-    if (target.includes('email')) {
-      return 'email';
-    }
-
-    if (target.includes('name')) {
-      return 'name';
-    }
-
-    return target;
+  private toPublicUser(user: User) {
+    return {
+      id: user.id,
+      name: user.name,
+      email: user.email,
+      role: user.role,
+    } as const;
   }
 }

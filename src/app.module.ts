@@ -4,14 +4,15 @@ import {
   NestModule,
   RequestMethod,
 } from '@nestjs/common';
+import { MikroOrmModule } from '@mikro-orm/nestjs';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { RequestContextMiddleware } from './common/middleware/request-context.middleware';
-import { PrismaModule } from './prisma/prisma.module';
+import mikroOrmConfig from './mikro-orm.config';
 import { UsersModule } from './users/users.module';
 
 @Module({
-  imports: [PrismaModule, UsersModule],
+  imports: [MikroOrmModule.forRoot(mikroOrmConfig), UsersModule],
   controllers: [AppController],
   providers: [AppService],
 })

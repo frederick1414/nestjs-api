@@ -1,14 +1,15 @@
 import { Test, TestingModule } from '@nestjs/testing';
+import { EntityManager } from '@mikro-orm/core';
 import { INestApplication } from '@nestjs/common';
 import request from 'supertest';
 import { App } from 'supertest/types';
 import { AppModule } from './../src/app.module';
 import { configureApp } from './../src/main';
-import { PrismaService } from './../src/prisma/prisma.service';
+import { User, UserRole } from './../src/users/entities/user.entity';
 
 describe('UsersController (e2e)', () => {
   let app: INestApplication<App>;
-  let prisma: PrismaService;
+  let em: EntityManager;
 
   beforeEach(async () => {
     const moduleFixture: TestingModule = await Test.createTestingModule({
@@ -19,22 +20,29 @@ describe('UsersController (e2e)', () => {
     configureApp(app);
     await app.init();
 
-    prisma = app.get(PrismaService);
-    await prisma.$executeRawUnsafe('TRUNCATE TABLE `users`;');
-    await prisma.user.createMany({
-      data: [
-        {
-          name: 'Juan',
-          email: 'juan@example.com',
-          passwordHash: 'seeded-hash-juan',
-        },
-        {
-          name: 'Maria',
-          email: 'maria@example.com',
-          passwordHash: 'seeded-hash-maria',
-        },
-      ],
-    });
+    em = app.get(EntityManager);
+    await em.getConnection().execute('SET FOREIGN_KEY_CHECKS = 0;');
+    await em.getConnection().execute('TRUNCATE TABLE `users`;');
+    await em.getConnection().execute('SET FOREIGN_KEY_CHECKS = 1;');
+    const now = new Date();
+    await em.insertMany(User, [
+      {
+        name: 'Juan',
+        email: 'juan@example.com',
+        passwordHash: 'seeded-hash-juan',
+        role: UserRole.USER,
+        createdAt: now,
+        updatedAt: now,
+      },
+      {
+        name: 'Maria',
+        email: 'maria@example.com',
+        passwordHash: 'seeded-hash-maria',
+        role: UserRole.USER,
+        createdAt: now,
+        updatedAt: now,
+      },
+    ]);
   });
 
   afterEach(async () => {

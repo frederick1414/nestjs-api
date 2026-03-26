@@ -1,8 +1,10 @@
+import 'dotenv/config';
+import { EntityManager } from '@mikro-orm/core';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { Logger } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter';
-import { PrismaService } from './prisma/prisma.service';
 
 export function configureApp(app: INestApplication) {
   app.useGlobalPipes(
@@ -16,10 +18,18 @@ export function configureApp(app: INestApplication) {
   app.useGlobalFilters(new HttpExceptionFilter());
 }
 
+async function runDatabaseHealthcheck(app: INestApplication) {
+  const logger = new Logger('DatabaseHealthcheck');
+  const em = app.get(EntityManager);
+
+  await em.getConnection().execute('SELECT 1 AS healthcheck');
+  logger.log('Database connection is healthy');
+}
+
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   configureApp(app);
-  await app.get(PrismaService).enableShutdownHooks(app);
+  await runDatabaseHealthcheck(app);
   await app.listen(process.env.PORT ?? 3000);
 }
 
